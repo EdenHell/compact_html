@@ -1,5 +1,7 @@
 #include "base64.h"
+#include "clipp.h"
 #include <cpprest/http_client.h>
+// #include <stdexcept>
 #include <string>
 
 #ifdef _WIN32
@@ -18,18 +20,29 @@ inline bool startswith(std::string_view s, std::string_view prefix) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc < 2) {
-    std::cout << "Usage: " << argv[0] << " HTML_FILE_NAME" << std::endl;
+  std::string input_file;
+  std::string output_file;
+  auto cli = (clipp::value("input html file", input_file),
+              clipp::opt_value("output html file", output_file),
+              clipp::option("-h", "--help") % "show help");
+
+  if (!parse(argc, argv, cli)) {
+    std::cerr << "Usage:\n"
+              << clipp::usage_lines(cli, argv[0]) << "\nOptions:\n"
+              << clipp::documentation(cli) << std::endl;
     return 1;
   }
-  std::filesystem::path src_html_path(argv[1]);
+  std::filesystem::path src_html_path(input_file);
   if (!std::filesystem::is_regular_file(src_html_path) ||
       src_html_path.extension() != ".html") {
+    std::cerr << "Usage:\n"
+              << clipp::usage_lines(cli, argv[0]) << "\nOptions:\n"
+              << clipp::documentation(cli) << std::endl;
     return 2;
   }
   std::ifstream html_file(src_html_path);
   if (!html_file.is_open()) {
-    std::cout << "Oooops" << std::endl;
+    std::cerr << "Cannot read from input file!" << std::endl;
     return 3;
   }
   auto content = (std::stringstream() << html_file.rdbuf()).str();
@@ -50,18 +63,21 @@ int main(int argc, char *argv[]) {
             utility::conversions::to_string_t(captured_str)));
         auto rsp = client.request(web::http::methods::GET).get();
         if (rsp.status_code() != web::http::status_codes::OK) {
-          throw std::runtime_error("Oooops");
+          throw std::runtime_error("Failed to request image data: " +
+                                   captured_str);
         }
         auto _content_type = rsp.headers().content_type();
         auto content_type =
             std::string(_content_type.begin(), _content_type.end());
         if (content_type.empty()) {
-          throw std::runtime_error("Oooops");
+          throw std::runtime_error("Failed to get Content-Type: " +
+                                   captured_str);
         }
         std::string type_prefix = "image/";
         if (content_type.length() <= type_prefix.length() ||
             !startswith(content_type, type_prefix)) {
-          throw std::runtime_error("Oooops");
+          throw std::runtime_error("Failed to identify image type: " +
+                                   captured_str);
         }
         img_type = content_type.substr(type_prefix.length());
         auto char_vector = rsp.extract_vector().get();
@@ -73,23 +89,21 @@ int main(int argc, char *argv[]) {
 #else
         std::filesystem::path img_file_path(captured_str);
 #endif
-        if (!img_file_path.is_absolute()) {
-          img_file_path = src_html_path.parent_path() / img_file_path;
-        }
         auto img_file_ext = img_file_path.extension().string();
-        if ((img_file_ext.size() <= 1) ||
-            !std::filesystem::is_regular_file(img_file_path)) {
-          throw std::runtime_error("Oooops");
+        if (img_file_ext.size() <= 1) {
+          throw std::runtime_error(
+              "The image file name must have an extension: " + captured_str);
         }
         img_type = img_file_ext.substr(1);
         std::ifstream img_file(img_file_path, std::ios::binary);
         if (!img_file.is_open()) {
-          std::cout << "Oooops" << std::endl;
-          throw std::runtime_error("Oooops");
+          throw std::runtime_error("Could not open file: " + captured_str);
         }
         img_content = (std::stringstream() << img_file.rdbuf()).str();
         img_file.close();
       }
+    } catch (std::runtime_error &e) {
+      std::cout << e.what() << std::endl;
     } catch (...) {
       std::cout << "Failed to load image data: " << captured_str << std::endl;
     }
@@ -106,16 +120,19 @@ int main(int argc, char *argv[]) {
       new_content += content;
     }
   }
-  auto dst_html_path =
-      std::filesystem::path(src_html_path).replace_extension(".compact.html");
-  if (!new_content.empty()) {
-    std::ofstream embedded_html_file(dst_html_path);
-    embedded_html_file << new_content;
-    embedded_html_file.close();
+  std::filesystem::path dst_html_path;
+  if (output_file.empty()) {
+    dst_html_path =
+        std::filesystem::path(input_file).replace_extension(".compact.html");
   } else {
-    std::filesystem::copy_file(
-        src_html_path, dst_html_path,
-        std::filesystem::copy_options::overwrite_existing);
+    dst_html_path = std::filesystem::path(output_file);
   }
+  std::ofstream embedded_html_file(dst_html_path);
+  if (!embedded_html_file.is_open()) {
+    std::cerr << "Cannot write to output file!" << std::endl;
+    return 4;
+  }
+  embedded_html_file << (new_content.empty() ? content : new_content);
+  embedded_html_file.close();
   return 0;
 }
